@@ -2,17 +2,24 @@ function main
     clear variables
     close all
 
-    DESKTOP_IP = '192.168.11.53';
+    config = motive_config();
     try
-        rosinit('http://localhost:11311','NodeHost',DESKTOP_IP)
-    catch
+        rosinit(char(config.rosMasterURI), 'NodeHost', char(config.rosNodeHost))
+    catch exception
+        % Reuse a working global ROS node, but do not hide real startup errors.
+        try
+            rosnode('list');
+            warning('Reusing the existing MATLAB ROS node. motive_config.m was not reapplied.')
+        catch
+            rethrow(exception)
+        end
     end
 
     % Read vehicle settings and register each vehicle object.
     vehicleSettings = readmatrix('vehiclesMyDesk.xlsx','OutputType','string','Range','A2');
     vehicles = RegisterVehicles(vehicleSettings);
     vehicleNames = fieldnames(vehicles);
-    vehicleCleanup = onCleanup(@() CleanupVehicles(vehicles)); %#ok<NASGU>
+    vehicleCleanup = onCleanup(@() CleanupVehicles(vehicles));
 
     % Main loop rate.
     freq = 20;
@@ -39,9 +46,18 @@ function main
             waitbar(j/maximumIteration, progress, ['Iteration ' num2str(j)]);
         end
 
+        odometryFresh = false(1, length(vehicleNames));
         for i = 1:length(vehicleNames)
-            vehicles.(vehicleNames{i}).update(rate);
+            odometryFresh(i) = vehicles.(vehicleNames{i}).update(rate);
             vehicles.(vehicleNames{i}).print;
+        end
+
+        if ~all(odometryFresh)
+            warning('Stale odometry detected. Sending zero commands: %s', ...
+                mat2str(odometryFresh))
+            SendZeroCommands(vehicles);
+            [~] = waitfor(rate);
+            continue
         end
 
         commands = ControllerOneLine(vehicles);
@@ -51,6 +67,13 @@ function main
         end
 
         [~] = waitfor(rate);
+    end
+end
+
+function SendZeroCommands(vehicles)
+    vehicleNames = fieldnames(vehicles);
+    for i = 1:length(vehicleNames)
+        vehicles.(vehicleNames{i}).send([0, 0]);
     end
 end
 

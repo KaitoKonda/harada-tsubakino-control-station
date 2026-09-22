@@ -16,6 +16,10 @@ function Calibrate(vehicles, rate)
     for i = 1:length(vehicleNames)
         vehicle = vehicles.(vehicleNames{i});
         odometry = vehicle.receive();
+        if isempty(odometry)
+            error('Calibrate:NoFreshOdometry', ...
+                'No fresh odometry is available for %s during calibration.', vehicle.name)
+        end
 
         % Calibrate according to odometry semantics, not communication protocol.
         switch vehicle.odometryType

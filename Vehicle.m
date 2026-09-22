@@ -17,6 +17,11 @@ classdef Vehicle < handle
         receiveRaw function_handle
         receive    function_handle
         send       function_handle
+        odometryTimeoutSeconds (1,1) double = 0.25
+        lastROSStamp            (1,1) double = NaN
+        lastROSMessageTimer
+        lastUDPPacketTimer
+        lastUDPOdometryRaw      double = []
     end
 
     methods
@@ -135,6 +140,26 @@ classdef Vehicle < handle
 
         function odometryRaw = ROSReceiveRaw(obj)
             odometryRaw = obj.ROSSubscriber.LatestMessage;
+            if isempty(odometryRaw) || ~isprop(odometryRaw, 'Header')
+                return
+            end
+
+            stamp = double(odometryRaw.Header.Stamp.Sec) ...
+                + double(odometryRaw.Header.Stamp.Nsec) * 1e-9;
+
+            % A zero stamp is accepted for compatibility with legacy sources.
+            % MotiveRosBridge always supplies a stamp, enabling stale-data safety.
+            if stamp <= 0
+                return
+            end
+
+            if isnan(obj.lastROSStamp) || stamp ~= obj.lastROSStamp
+                obj.lastROSStamp = stamp;
+                obj.lastROSMessageTimer = tic;
+            elseif ~isempty(obj.lastROSMessageTimer) ...
+                    && toc(obj.lastROSMessageTimer) > obj.odometryTimeoutSeconds
+                odometryRaw = [];
+            end
         end
 
         % Parse ROS message into a normalized odometry struct.
@@ -193,7 +218,13 @@ classdef Vehicle < handle
 
             % Non-blocking read: return empty when no full packet has arrived yet.
             if bytesAvailable < bytesPerPacket
-                odometryRaw = [];
+                if ~isempty(obj.lastUDPOdometryRaw) ...
+                        && ~isempty(obj.lastUDPPacketTimer) ...
+                        && toc(obj.lastUDPPacketTimer) <= obj.odometryTimeoutSeconds
+                    odometryRaw = obj.lastUDPOdometryRaw;
+                else
+                    odometryRaw = [];
+                end
                 return
             end
 
@@ -201,6 +232,8 @@ classdef Vehicle < handle
             packetCount = floor(bytesAvailable / bytesPerPacket);
             data = read(obj.UDPReceiver, packetCount * packetSize, 'double');
             odometryRaw = data(end - packetSize + 1:end);
+            obj.lastUDPOdometryRaw = odometryRaw;
+            obj.lastUDPPacketTimer = tic;
         end
 
         % Parse UDP payload into the same normalized odometry struct as ROS.
@@ -241,10 +274,11 @@ classdef Vehicle < handle
         % 状態を更新
         % Update vehicle state from normalized odometry.
         % This method is independent from transport protocol.
-        function obj = update(obj, rate)
+        function updated = update(obj, rate)
 
             freq = rate.DesiredRate;
             odometry = obj.receive();
+            updated = false;
 
             % Skip update when odometry is dropped or unavailable.
             if isempty(odometry)
@@ -264,6 +298,7 @@ classdef Vehicle < handle
 
                     obj.speed           = norm(obj.position - positionPrev, 2) * freq;
                     obj.angularVelocity = (obj.orientation - orientationPrev) * freq;
+                    updated = true;
 
                 case 'speed&angularVelocity' % 速度と角速度を取得する場合
 
@@ -280,6 +315,7 @@ classdef Vehicle < handle
                     obj.orientation = obj.orientation + (obj.angularVelocity + angularVelocityPrev) / 2 / freq;
                     obj.position    = obj.position    + (obj.speed * [cos(obj.orientation); sin(obj.orientation)]...
                         + speedPrev * [cos(orientationPrev); sin(orientationPrev)]) / 2 / freq;
+                    updated = true;
                     
                 otherwise
                     error('Invalid odometryType for %s', obj.name)

@@ -2,16 +2,16 @@ function dummy_ros_vehicle(vehicleName, odomTopicSuffix, commandTopicSuffix, odo
 % DUMMY_ROS_VEHICLE ROS dummy vehicle for manager-side integration tests.
 %
 % Example (position mode):
-%   dummy_ros_vehicle("pi1","OTOS","rover_drive","position&orientation","nav_msgs/Odometry",20,"192.168.24.26","http://localhost:11311")
+%   dummy_ros_vehicle("pi1","localization/odom","rover_drive","position&orientation","nav_msgs/Odometry",20,"192.168.24.26","http://localhost:11311")
 %
 % Example (speed mode):
-%   dummy_ros_vehicle("pi1","OTOS","rover_drive","speed&angularVelocity","geometry_msgs/Twist",20,"192.168.24.26","http://localhost:11311")
+%   dummy_ros_vehicle("pi1","localization/odom","rover_drive","speed&angularVelocity","geometry_msgs/Twist",20,"192.168.24.26","http://localhost:11311")
 
     if nargin < 1 || strlength(vehicleName) == 0
         vehicleName = "dummy1";
     end
     if nargin < 2 || strlength(odomTopicSuffix) == 0
-        odomTopicSuffix = "OTOS";
+        odomTopicSuffix = "localization/odom";
     end
     if nargin < 3 || strlength(commandTopicSuffix) == 0
         commandTopicSuffix = "rover_drive";
@@ -49,7 +49,7 @@ function dummy_ros_vehicle(vehicleName, odomTopicSuffix, commandTopicSuffix, odo
 
     odomPub = rospublisher(odomTopic, messageType);
     commandSub = rossubscriber(commandTopic, "geometry_msgs/Twist");
-    cleaner = onCleanup(@() localCleanup(startedRosHere)); %#ok<NASGU>
+    cleaner = onCleanup(@() localCleanup(startedRosHere));
 
     fprintf("Dummy ROS vehicle started: pub=%s (%s), sub=%s\n", odomTopic, messageType, commandTopic);
     fprintf("Press Ctrl+C to stop.\n");
@@ -78,6 +78,10 @@ function dummy_ros_vehicle(vehicleName, odomTopicSuffix, commandTopicSuffix, odo
             case "nav_msgs/Odometry"
                 msg = rosmessage("nav_msgs/Odometry");
                 q = eul2quat([theta 0 0], "ZYX"); % [w x y z]
+
+                msg.Header.Stamp = rostime('now');
+                msg.Header.FrameId = 'odom';
+                msg.ChildFrameId = char(vehicleName + "/base_link");
 
                 msg.Pose.Pose.Position.X = x;
                 msg.Pose.Pose.Position.Y = y;
