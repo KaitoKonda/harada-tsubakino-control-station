@@ -1,75 +1,58 @@
 function dummy_udp_vehicle(managerIP, odometryPort, commandPort, odometryType, rateHz)
-% DUMMY_UDP_VEHICLE Simple UDP dummy vehicle for manager-side integration tests.
-%   dummy_udp_vehicle("127.0.0.1",12345,23456,"speed&angularVelocity",20)
-
-    if nargin < 1 || strlength(managerIP) == 0
-        managerIP = "127.0.0.1";
-    end
-    if nargin < 2 || isempty(odometryPort)
-        odometryPort = 12345;
-    end
-    if nargin < 3 || isempty(commandPort)
-        commandPort = 23456;
-    end
-    if nargin < 4 || strlength(odometryType) == 0
-        odometryType = "speed&angularVelocity";
-    end
-    if nargin < 5 || isempty(rateHz)
-        rateHz = 20;
-    end
-
-    odometryTx = udpport("ByteOrder","big-endian");
-    commandRx  = udpport("LocalPort",commandPort,"ByteOrder","big-endian");
-    cleaner = onCleanup(@() localCleanup(odometryTx, commandRx)); %#ok<NASGU>
-
-    fprintf("Dummy UDP vehicle started: odometry->%s:%d, commandPort=%d, type=%s\n", ...
-        managerIP, odometryPort, commandPort, odometryType);
-    fprintf("Press Ctrl+C to stop.\n");
-
-    t = 0;
-    dt = 1 / rateHz;
-    x = 0;
-    y = 0;
-    theta = 0;
-    v = 0.5;
-    w = 0.3;
-    seq = 0;
-
+%DUMMY_UDP_VEHICLE Standalone loopback transport test with a 0.25 s command timeout.
+% dummy_udp_vehicle("127.0.0.1",12345,34567,"speed&angularVelocity",20)
+    if nargin<1, managerIP="127.0.0.1"; end
+    if nargin<2, odometryPort=12345; end
+    if nargin<3, commandPort=34567; end
+    if nargin<4, odometryType="speed&angularVelocity"; end
+    if nargin<5, rateHz=20; end
+    validateattributes(rateHz,{'numeric'},{'scalar','positive','finite'});
+    assert(ismember(string(odometryType),["position&orientation","speed&angularVelocity"]), ...
+        'Station:InvalidSettings','Unsupported UDP odometry type.');
+    odometryTx=udpport("datagram","IPV4","ByteOrder","big-endian");
+    commandRx=udpport("datagram","IPV4","LocalPort",commandPort,"ByteOrder","big-endian");
+    cleaner=onCleanup(@() release(odometryTx,commandRx));
+    fprintf('Dummy UDP: state -> %s:%d, command port=%d. Ctrl+C to stop.\n', ...
+        managerIP,odometryPort,commandPort);
+    x=0; y=0; theta=0; v=0; w=0; seq=0;
+    received=[];
+    previous=tic;
     while true
-        t = t + dt;
-        seq = seq + 1;
-
-        switch odometryType
-            case "position&orientation"
-                x = x + v * cos(theta) * dt;
-                y = y + v * sin(theta) * dt;
-                theta = theta + w * dt;
-                packet = [x, y, theta];
-
-            case {"speed&angularVelocity","velocity&angularVelocity"}
-                packet = [double(seq), v, w];
-
-            otherwise
-                error("Unsupported odometryType: %s", odometryType)
+        step=tic;
+        dt=toc(previous);
+        previous=tic;
+        count=commandRx.NumDatagramsAvailable;
+        if count>0
+            packets=read(commandRx,count,"uint8");
+            for k=1:numel(packets)
+                bytes=uint8(packets(k).Data);
+                if numel(bytes)~=16, continue; end
+                command=typecast(bytes(:),'double');
+                [~,~,endian]=computer;
+                if endian=='L', command=swapbytes(command); end
+                if all(isfinite(command))
+                    v=command(1); w=command(2); received=tic;
+                end
+            end
         end
-
-        write(odometryTx, packet, "double", managerIP, odometryPort);
-
-        % Optional command read for visibility during testing.
-        if commandRx.NumBytesAvailable >= 16
-            command = read(commandRx, floor(commandRx.NumBytesAvailable / 8), "double");
-            fprintf("Received command: %s\n", mat2str(command(:).'));
+        if isempty(received) || toc(received)>0.25
+            v=0; w=0;
         end
-
-        pause(dt);
+        x=x+v*cos(theta)*dt;
+        y=y+v*sin(theta)*dt;
+        theta=theta+w*dt;
+        seq=seq+1;
+        if odometryType=="position&orientation"
+            packet=[x y theta];
+        else
+            packet=[seq v w];
+        end
+        write(odometryTx,packet,"double",managerIP,odometryPort);
+        pause(max(0,1/rateHz-toc(step)));
     end
 end
 
-function localCleanup(odometryTx, commandRx)
-    if ~isempty(commandRx)
-        delete(commandRx)
-    end
-    if ~isempty(odometryTx)
-        delete(odometryTx)
-    end
+function release(tx,rx)
+    delete(rx);
+    delete(tx);
 end

@@ -211,13 +211,14 @@ rosshutdown
 config = motive_config();
 config.serverIP = "192.168.x.x"; % Motive PC
 config.clientIP = "192.168.x.x"; % ノートPCの有線LAN側
-config.rosNodeHost = "127.0.0.1";
+station = station_config();
+station.ros.nodeHost = "127.0.0.1";
 
-config.rigidBodies = config.rigidBodies(1);
+config.rigidBodies = MotiveMappings(LoadVehicleSettings(station.vehicleFile, "pi1"));
 config.rigidBodies.name = "Motive上のRigid Body名";
 config.rigidBodies.id = 1; % 実際のStreaming ID
 
-run_motive_ros_bridge(config)
+run_motive_ros_bridge(config, station)
 ```
 
 成功すると`Motive bridge connected: ...`と`Press Ctrl+C to stop.`が表示される。この状態では処理が継続しているため、MATLAB Aの`>>`は戻ってこない。それが正常である。MATLAB Aは閉じず、そのままにする。
@@ -261,8 +262,9 @@ fprintf("stamp=%d.%09d  x=%.3f  y=%.3f  z=%.3f\n", ...
 2. キーボードのCtrl+Cを押す。
 3. `>>`が再び表示されるまで待つ。
 4. MATLAB Bで`rosshutdown`を実行する。
+5. MATLAB Aでも`rosshutdown`を実行する。
 
-ブリッジが開始したROS masterとNatNet接続は、MATLAB Aの終了処理で閉じられる。先にMotiveやLANケーブルを切る必要はない。
+NatNet接続はブリッジの終了処理で閉じられる。ROS masterは他の処理と共用するため、ブリッジ停止だけでは閉じない。両MATLABで上記の終了操作を行う。
 
 ## 失敗時の切り分け
 
@@ -307,7 +309,7 @@ fprintf("stamp=%d.%09d  x=%.3f  y=%.3f  z=%.3f\n", ...
 - [ ] Rigid Bodyを動かすと位置とタイムスタンプが更新された。
 - [ ] Ctrl+Cと`rosshutdown`で正常終了した。
 
-すべて合格してから、ノートPCを可搬ルータへWi-Fi接続し、`rosNodeHost`をWi-Fi側IPへ変更する。その後、ローバ1台、複数ローバ、Kachakaの順に接続範囲を広げる。
+すべて合格してから、ノートPCを可搬ルータへWi-Fi接続し、`station_config.m` の `ros.nodeHost` をWi-Fi側IPへ変更する。その後、READMEの `main("experiment", Vehicles="pi1")` から、複数ローバ、Kachakaの順に接続範囲を広げる。
 
 ## 試験結果メモ
 

@@ -1,0 +1,5 @@
+name,enabled,odometryProtocol,commandProtocol,odometryType,coordinateMode,x0,y0,theta0,odometryTopic,odometryMessageType,commandTopic,odometryPort,commandLocalPort,commandTargetPort,vehicleIP,motiveName,motiveId
+pi1,1,ROS,ROS,position&orientation,global,0,0,0,/pi1/localization/odom,nav_msgs/Odometry,/pi1/rover_drive,,,,,pi1,
+pi2,1,ROS,ROS,position&orientation,global,1,0,0,/pi2/localization/odom,nav_msgs/Odometry,/pi2/rover_drive,,,,,pi2,
+pi3,1,ROS,ROS,position&orientation,global,-1,0,0,/pi3/localization/odom,nav_msgs/Odometry,/pi3/rover_drive,,,,,pi3,
+katchaka,0,UDP,UDP,speed&angularVelocity,initial,2,0,0,,,,12345,23456,34567,127.0.0.1,,

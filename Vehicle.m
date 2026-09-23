@@ -1,328 +1,293 @@
 classdef Vehicle < handle
-
+%VEHICLE Normalized state with independent odometry and command transports.
+% Simulation never opens ROS or UDP resources.
     properties
-        name         string
-        protocol     string
-        odometryType string
-        position        (2,1) double = zeros(2,1)
-        speed           (1,1) double = 0
-        orientation     (1,1) double = 0
+        name string = ""
+        position (2,1) double = [0;0]
+        orientation (1,1) double = 0
+        speed (1,1) double = 0
         angularVelocity (1,1) double = 0
-        positionOffset    (2,1) double = zeros(2,1)
-        orientationOffset (1,1) double = 0
+    end
+    properties (SetAccess=private)
+        settings
+        mode string = "simulation"
+        lastCommand (1,2) double = [0 0]
+        odometryTimeoutSeconds double = 0.25
+    end
+    properties (Access=private)
         ROSSubscriber
         ROSPublisher
         UDPReceiver
         UDPSender
-        receiveRaw function_handle
-        receive    function_handle
-        send       function_handle
-        odometryTimeoutSeconds (1,1) double = 0.25
-        lastROSStamp            (1,1) double = NaN
-        lastROSMessageTimer
-        lastUDPPacketTimer
-        lastUDPOdometryRaw      double = []
+        clock
+        observation = []
+        observationTime double = -Inf
+        sampleNumber double = 0
+        appliedSample double = -1
+        previousPoseTime double = NaN
+        lastROSStamp double = NaN
+        poseRotation double = eye(2)
+        poseTranslation double = [0;0]
+        yawOffset double = 0
+        simulationPose double = [0 0 0]
+        simulationTime double = 0
+        integrationReady logical = false
+        deleting logical = false
     end
-
     methods
-        % コンストラクタ
-        % settings row format:
-        % [name, protocol, odometryType, x0, y0, theta0, arg1, arg2, arg3, ...]
-        function obj = Vehicle(settings)
-            obj.name         = settings(1);
-            obj.protocol     = settings(2);
-            obj.odometryType = settings(3);
-            obj.positionOffset     = double(settings(4:5));
-            obj.orientationOffset  = double(settings(6));
-            args = settings(7:end);
+        function obj = Vehicle(settings, mode, timeout)
+            if nargin<2, mode="experiment"; end
+            if nargin<3, timeout=0.25; end
+            obj.settings = settings;
+            obj.name = settings.name;
+            obj.mode = mode;
+            obj.odometryTimeoutSeconds = timeout;
+            obj.clock = tic;
+            obj.simulationPose = settings.initialPose;
+            obj.position = settings.initialPose(1:2).';
+            obj.orientation = settings.initialPose(3);
+            if mode=="simulation"
+                obj.simulate(0);
+                return
+            end
+            assert(mode=="experiment",'Station:InvalidMode','Unknown execution mode.');
+            switch settings.odometryProtocol
+                case "ROS"
+                    obj.ROSSubscriber = rossubscriber(char(settings.odometryTopic), ...
+                        char(settings.odometryMessageType), ...
+                        @(~,msg) obj.acceptROSMessage(msg), 'DataFormat','struct');
+                case "UDP"
+                    obj.UDPReceiver = udpport("datagram","IPV4", ...
+                        "LocalPort",settings.odometryPort, "ByteOrder","big-endian");
+            end
+            switch settings.commandProtocol
+                case "ROS"
+                    obj.ROSPublisher = rospublisher(char(settings.commandTopic), ...
+                        'geometry_msgs/Twist', 'DataFormat','struct');
+                case "UDP"
+                    obj.UDPSender = udpport("datagram","IPV4", ...
+                        "LocalPort",settings.commandLocalPort, "ByteOrder","big-endian");
+            end
+        end
 
-            switch obj.protocol
-                case 'ROS'  % ROSで通信する場合
+        function send(obj, command)
+            assert(isnumeric(command) && isreal(command) && numel(command)==2 && ...
+                all(isfinite(command(:))), 'Station:InvalidCommands','Invalid command for %s.',obj.name);
+            command = double(command(:).');
+            if obj.mode=="simulation"
+                obj.lastCommand = command;
+                return
+            end
+            if isempty(obj.settings), return; end
+            if obj.settings.commandProtocol=="ROS"
+                if isempty(obj.ROSPublisher), return; end
+                msg = rosmessage(obj.ROSPublisher);
+                msg.Linear.X = command(1);
+                msg.Angular.Z = command(2);
+                send(obj.ROSPublisher,msg);
+            else
+                if isempty(obj.UDPSender), return; end
+                write(obj.UDPSender,command,"double", ...
+                    obj.settings.vehicleIP,obj.settings.commandTargetPort);
+            end
+            obj.lastCommand = command;
+        end
 
-                    ROSSubscriberTopic = sprintf('/%s/%s', obj.name, args(1));
-                    ROSPublisherTopic  = sprintf('/%s/%s', obj.name, args(2));
-                    ROSSubscriberMessageType = args(3);
-
-                    obj.ROSSubscriber = rossubscriber(ROSSubscriberTopic, ROSSubscriberMessageType);
-                    obj.ROSPublisher  = rospublisher(ROSPublisherTopic, 'geometry_msgs/Twist');
-
-                    % protocol-specific raw receiver + protocol-agnostic odometry receiver
-                    obj.receiveRaw = @obj.ROSReceiveRaw;
-                    obj.receive    = @obj.ReceiveOdometry;
-                    obj.send       = @(command) obj.ROSPublish(command);
-
-                case 'UDP'  % UDPで通信する場合
-
-                    UDPReceiverPort = double(args(1));
-                    UDPSenderLocalPort = double(args(2));
-
-                    % New format (recommended):
-                    %   arg1=UDPReceiverPort, arg2=UDPSenderLocalPort, arg3=UDPCommandTargetPort, arg4=VehicleIP
-                    % Backward compatible format:
-                    %   arg1=UDPReceiverPort, arg2=UDPSenderPort(as both local and target), arg3=VehicleIP
-                    if numel(args) >= 4 && strlength(args(4)) > 0
-                        UDPCommandTargetPort = double(args(3));
-                        UDPVehicleIP = args(4);
-                    elseif numel(args) >= 3 && strlength(args(3)) > 0
-                        UDPCommandTargetPort = double(args(2));
-                        UDPVehicleIP = args(3);
-                    else
-                        error('Invalid UDP settings for %s', obj.name)
+        function odometry = receive(obj)
+            if obj.mode=="experiment" && obj.settings.odometryProtocol=="UDP"
+                count = obj.UDPReceiver.NumDatagramsAvailable;
+                if count>0
+                    packets = read(obj.UDPReceiver,count,"uint8");
+                    for k=1:numel(packets)
+                        bytes = uint8(packets(k).Data);
+                        % Preserve datagram boundaries; malformed packets do not refresh the timeout.
+                        if numel(bytes)~=24, continue; end
+                        values = typecast(bytes(:),'double');
+                        [~,~,endian] = computer;
+                        if endian=='L', values=swapbytes(values); end
+                        obj.acceptObservation(obj.parseUDP(values),toc(obj.clock));
                     end
-
-                    obj.UDPReceiver = udpport('LocalPort', UDPReceiverPort, 'ByteOrder', 'big-endian');
-                    obj.UDPSender   = udpport('LocalPort', UDPSenderLocalPort, 'ByteOrder', 'big-endian');
-                    configureTerminator(obj.UDPReceiver, 'LF')
-                    configureTerminator(obj.UDPSender, 'LF')
-
-                    % protocol-specific raw receiver + protocol-agnostic odometry receiver
-                    obj.receiveRaw = @obj.UDPReceiveRaw;
-                    obj.receive    = @obj.ReceiveOdometry;
-                    obj.send       = @(command) obj.UDPSend(UDPVehicleIP, UDPCommandTargetPort, command);
-
-                case 'TCP'
-                    
-                otherwise
-                    error('Invalid communication protocol for %s', obj.name)
-            end
-        end
-
-        % 位置と姿勢を表示
-        % Per-object cleanup for communication resources.
-        function delete(obj)
-
-            % Command halt.
-            obj.send([0, 0])
-            
-            if ~isempty(obj.UDPReceiver)
-                try
-                    delete(obj.UDPReceiver);
-                catch
                 end
             end
-
-            if ~isempty(obj.UDPSender)
-                try
-                    delete(obj.UDPSender);
-                catch
-                end
-            end
-        end
-
-        function print(obj)
-            fprintf('%s :\n', obj.name)
-            fprintf('   position    : %f\n', obj.position(1))
-            fprintf('                 %f\n', obj.position(2))
-            fprintf('   orientation : %f\n', obj.orientation)
-        end
-
-        % ROSでオドメトリを受信
-        % Unified receive entry point:
-        % 1) get raw payload using current protocol
-        % 2) parse payload according to selected odometryType
-        function odometry = ReceiveOdometry(obj)
-            odometryRaw = obj.receiveRaw();
-
-            if isempty(odometryRaw)
+            odometry = obj.observation;
+            if obj.mode=="experiment" && toc(obj.clock)-obj.observationTime>obj.odometryTimeoutSeconds
                 odometry = [];
-                return
-            end
-
-            switch obj.protocol
-                case 'ROS'
-                    odometry = obj.ParseROSOdometry(odometryRaw);
-                case 'UDP'
-                    odometry = obj.ParseUDPOdometry(odometryRaw);
-                otherwise
-                    error('Invalid communication protocol for %s', obj.name)
             end
         end
 
-        function odometryRaw = ROSReceiveRaw(obj)
-            odometryRaw = obj.ROSSubscriber.LatestMessage;
-            if isempty(odometryRaw) || ~isprop(odometryRaw, 'Header')
-                return
-            end
-
-            stamp = double(odometryRaw.Header.Stamp.Sec) ...
-                + double(odometryRaw.Header.Stamp.Nsec) * 1e-9;
-
-            % A zero stamp is accepted for compatibility with legacy sources.
-            % MotiveRosBridge always supplies a stamp, enabling stale-data safety.
-            if stamp <= 0
-                return
-            end
-
-            if isnan(obj.lastROSStamp) || stamp ~= obj.lastROSStamp
-                obj.lastROSStamp = stamp;
-                obj.lastROSMessageTimer = tic;
-            elseif ~isempty(obj.lastROSMessageTimer) ...
-                    && toc(obj.lastROSMessageTimer) > obj.odometryTimeoutSeconds
-                odometryRaw = [];
-            end
-        end
-
-        % Parse ROS message into a normalized odometry struct.
-        % protocol and odometryType are intentionally decoupled here.
-        function odometry = ParseROSOdometry(obj, odometryRaw)
-            switch obj.odometryType
-                case 'position&orientation'
-                    switch odometryRaw.MessageType
-                        case 'nav_msgs/Odometry'
-                            position    = odometryRaw.Pose.Pose.Position;
-                            orientation = odometryRaw.Pose.Pose.Orientation;
-                            orientation = quat2eul([orientation.W orientation.X orientation.Y orientation.Z]);
-
-                            odometry.position = [position.X; position.Y];
-                            odometry.orientation = orientation(1);
-                        otherwise
-                            error('MessageType %s cannot provide %s for %s', odometryRaw.MessageType, obj.odometryType, obj.name)
-                    end
-
-                case 'speed&angularVelocity'
-                    switch odometryRaw.MessageType
-                        case 'nav_msgs/Odometry'
-                            linear  = odometryRaw.Twist.Twist.Linear;
-                            angular = odometryRaw.Twist.Twist.Angular;
-                        case 'geometry_msgs/Twist'
-                            linear  = odometryRaw.Linear;
-                            angular = odometryRaw.Angular;
-                        otherwise
-                            error('MessageType %s cannot provide %s for %s', odometryRaw.MessageType, obj.odometryType, obj.name)
-                    end
-
-                    % Use planar speed magnitude so message layout does not leak to update().
-                    odometry.speed = norm([linear.X, linear.Y], 2);
-                    odometry.angularVelocity = angular.Z;
-
-                otherwise
-                    error('Invalid odometryType for %s', obj.name)
-            end
-        end
-
-        % ROSで指令値を送信
-        function ROSPublish(obj, command)
-            message = rosmessage('geometry_msgs/Twist');
-            message.Linear.X  = command(1);
-            message.Angular.Z = command(2);
-            send(obj.ROSPublisher, message)
-        end
-
-        % UDPでオドメトリを受信
-        % Read the latest UDP packet.
-        % Packet size depends on odometryType definition.
-        function odometryRaw = UDPReceiveRaw(obj)
-            packetSize = obj.ExpectedUDPPacketSize();
-            bytesPerPacket = packetSize * 8; % double = 8 bytes
-            bytesAvailable = obj.UDPReceiver.NumBytesAvailable;
-
-            % Non-blocking read: return empty when no full packet has arrived yet.
-            if bytesAvailable < bytesPerPacket
-                if ~isempty(obj.lastUDPOdometryRaw) ...
-                        && ~isempty(obj.lastUDPPacketTimer) ...
-                        && toc(obj.lastUDPPacketTimer) <= obj.odometryTimeoutSeconds
-                    odometryRaw = obj.lastUDPOdometryRaw;
-                else
-                    odometryRaw = [];
+        function acceptROSMessage(obj, msg)
+            % Called on message arrival, including headerless Twist and zero-stamp publishers.
+            % A positive stamp must progress: repeated stamped frames are not fresh measurements.
+            if isfield(msg,'Header')
+                stamp = double(msg.Header.Stamp.Sec)+double(msg.Header.Stamp.Nsec)*1e-9;
+                if ~isfinite(stamp) || stamp<0, return; end
+                if stamp>0
+                    if stamp==obj.lastROSStamp, return; end
+                    obj.lastROSStamp = stamp;
                 end
-                return
             end
-
-            % If multiple packets are queued, consume all complete packets and keep the latest.
-            packetCount = floor(bytesAvailable / bytesPerPacket);
-            data = read(obj.UDPReceiver, packetCount * packetSize, 'double');
-            odometryRaw = data(end - packetSize + 1:end);
-            obj.lastUDPOdometryRaw = odometryRaw;
-            obj.lastUDPPacketTimer = tic;
+            obj.acceptObservation(obj.parseROS(msg),toc(obj.clock));
         end
 
-        % Parse UDP payload into the same normalized odometry struct as ROS.
-        function odometry = ParseUDPOdometry(obj, odometryRaw)
-            switch obj.odometryType
-                case 'position&orientation'
-                    payload = odometryRaw(end-2:end);
-                    odometry.position = payload(1:2);
-                    odometry.orientation = payload(3);
-
-                case 'speed&angularVelocity'
-                    payload = odometryRaw(end-1:end);
-                    odometry.speed = payload(1);
-                    odometry.angularVelocity = payload(2);
-
-                otherwise
-                    error('Invalid odometryType for %s', obj.name)
-            end
-        end
-
-        function packetSize = ExpectedUDPPacketSize(obj)
-            % Keep this function explicit so UDP layout changes are isolated here.
-            switch obj.odometryType
-                case 'position&orientation'
-                    packetSize = 3;
-                case 'speed&angularVelocity'
-                    packetSize = 3;
-                otherwise
-                    error('Invalid odometryType for %s', obj.name)
-            end
-        end
-
-        % UDPで指令値を送信
-        function UDPSend(obj, vehicleIP, commandTargetPort, command)
-            write(obj.UDPSender, command, 'double', vehicleIP, commandTargetPort)
-        end
-
-        % 状態を更新
-        % Update vehicle state from normalized odometry.
-        % This method is independent from transport protocol.
-        function updated = update(obj, rate)
-
-            freq = rate.DesiredRate;
+        function calibrate(obj)
             odometry = obj.receive();
-            updated = false;
-
-            % Skip update when odometry is dropped or unavailable.
-            if isempty(odometry)
-                return
+            assert(~isempty(odometry),'Calibrate:NoFreshOdometry', ...
+                'No fresh odometry for %s.',obj.name);
+            obj.poseRotation = eye(2);
+            obj.poseTranslation = [0;0];
+            obj.yawOffset = 0;
+            if obj.settings.odometryType=="position&orientation"
+                if obj.settings.coordinateMode=="initial"
+                    obj.yawOffset = obj.settings.initialPose(3)-odometry.orientation;
+                    a = obj.yawOffset;
+                    obj.poseRotation = [cos(a) -sin(a);sin(a) cos(a)];
+                    obj.poseTranslation = obj.settings.initialPose(1:2).'-obj.poseRotation*odometry.position;
+                end
+                obj.position = obj.poseRotation*odometry.position+obj.poseTranslation;
+                obj.orientation = odometry.orientation+obj.yawOffset;
+                obj.previousPoseTime = obj.observationTime;
+                obj.appliedSample = obj.sampleNumber;
+            else
+                obj.position = obj.settings.initialPose(1:2).';
+                obj.orientation = obj.settings.initialPose(3);
             end
-            
-            switch obj.odometryType
-                case 'position&orientation' % 位置と姿勢を取得する場合
-
-                    if ~isstruct(odometry) || ~isfield(odometry, 'position') || ~isfield(odometry, 'orientation')
-                        return
-                    end
-                    positionPrev    = obj.position;
-                    orientationPrev = obj.orientation;
-                    obj.position    = odometry.position + obj.positionOffset;
-                    obj.orientation = odometry.orientation + obj.orientationOffset;
-
-                    obj.speed           = norm(obj.position - positionPrev, 2) * freq;
-                    obj.angularVelocity = (obj.orientation - orientationPrev) * freq;
-                    updated = true;
-
-                case 'speed&angularVelocity' % 速度と角速度を取得する場合
-
-                    if ~isstruct(odometry) || ~isfield(odometry, 'speed') || ~isfield(odometry, 'angularVelocity')
-                        return
-                    end
-                    speedPrev           = obj.speed;
-                    angularVelocityPrev = obj.angularVelocity;
-                    orientationPrev     = obj.orientation;
-                    obj.speed           = odometry.speed;
-                    obj.angularVelocity = odometry.angularVelocity;
-
-                    % Trapezoidal integration for smoother discrete-time estimation.
-                    obj.orientation = obj.orientation + (obj.angularVelocity + angularVelocityPrev) / 2 / freq;
-                    obj.position    = obj.position    + (obj.speed * [cos(obj.orientation); sin(obj.orientation)]...
-                        + speedPrev * [cos(orientationPrev); sin(orientationPrev)]) / 2 / freq;
-                    updated = true;
-                    
-                otherwise
-                    error('Invalid odometryType for %s', obj.name)
-            end
-
+            obj.speed = 0;
+            obj.angularVelocity = 0;
+            obj.integrationReady = false;
         end
 
-    end
+        function fresh = update(obj, dt)
+            validateattributes(dt,{'numeric'},{'scalar','real','finite','nonnegative'});
+            if obj.mode=="simulation"
+                obj.simulate(dt);
+            end
+            odometry = obj.receive();
+            fresh = ~isempty(odometry);
+            if ~fresh
+                obj.integrationReady = false;
+                return
+            end
+            if obj.settings.odometryType=="position&orientation"
+                if obj.appliedSample==obj.sampleNumber, return; end
+                p = obj.poseRotation*odometry.position+obj.poseTranslation;
+                a = odometry.orientation+obj.yawOffset;
+                elapsed = obj.observationTime-obj.previousPoseTime;
+                if isfinite(elapsed) && elapsed>0
+                    % Signed forward speed and shortest angular difference.
+                    delta = p-obj.position;
+                    obj.speed = dot(delta,[cos(a);sin(a)])/elapsed;
+                    obj.angularVelocity = atan2(sin(a-obj.orientation),cos(a-obj.orientation))/elapsed;
+                else
+                    obj.speed=0;
+                    obj.angularVelocity=0;
+                end
+                obj.position = p;
+                obj.orientation = a;
+                obj.previousPoseTime = obj.observationTime;
+                obj.appliedSample = obj.sampleNumber;
+            else
+                oldSpeed = obj.speed;
+                oldAngular = obj.angularVelocity;
+                oldYaw = obj.orientation;
+                obj.speed = odometry.speed;
+                obj.angularVelocity = odometry.angularVelocity;
+                % Never integrate an unobserved outage interval on reconnection.
+                if obj.integrationReady
+                    obj.orientation = oldYaw+(oldAngular+obj.angularVelocity)*dt/2;
+                    obj.position = obj.position+dt/2*( ...
+                        oldSpeed*[cos(oldYaw);sin(oldYaw)]+ ...
+                        obj.speed*[cos(obj.orientation);sin(obj.orientation)]);
+                end
+                obj.integrationReady = true;
+            end
+        end
 
+        function state = snapshot(obj)
+            state = [obj.position.' obj.orientation obj.speed obj.angularVelocity];
+        end
+
+        function delete(obj)
+            if obj.deleting, return; end
+            obj.deleting = true;
+            try
+                obj.send([0 0]);
+            catch exception
+                warning('Station:StopFailed','Stop failed for %s: %s',obj.name,exception.message);
+            end
+            for field = ["ROSSubscriber","ROSPublisher","UDPReceiver","UDPSender"]
+                try
+                    resource = obj.(field);
+                    if ~isempty(resource), delete(resource); end
+                catch exception
+                    warning('Station:CleanupFailed','Cleanup failed for %s: %s',obj.name,exception.message);
+                end
+                obj.(field) = [];
+            end
+        end
+    end
+    methods (Access=private)
+        function acceptObservation(obj, value, time)
+            if isempty(value), return; end
+            obj.observation = value;
+            obj.observationTime = time;
+            obj.sampleNumber = obj.sampleNumber+1;
+        end
+
+        function value = parseROS(obj,msg)
+            value = [];
+            if obj.settings.odometryType=="position&orientation"
+                p = msg.Pose.Pose.Position;
+                q = msg.Pose.Pose.Orientation;
+                quaternion = double([q.W q.X q.Y q.Z]);
+                if ~all(isfinite(quaternion)) || norm(quaternion)<eps, return; end
+                quaternion=quaternion/norm(quaternion);
+                w=quaternion(1); x=quaternion(2); y=quaternion(3); z=quaternion(4);
+                pose = double([p.X;p.Y]);
+                yaw = atan2(2*(w*z+x*y),1-2*(y*y+z*z));
+                if ~all(isfinite(pose)), return; end
+                value=struct('position',pose,'orientation',yaw);
+            else
+                if isfield(msg,'Twist')
+                    twist=msg.Twist.Twist;
+                else
+                    twist=msg;
+                end
+                v=double(twist.Linear.X);
+                w=double(twist.Angular.Z);
+                if all(isfinite([v w]))
+                    value=struct('speed',v,'angularVelocity',w);
+                end
+            end
+        end
+
+        function value = parseUDP(obj,values)
+            value=[];
+            if ~all(isfinite(values)), return; end
+            if obj.settings.odometryType=="position&orientation"
+                value=struct('position',values(1:2),'orientation',values(3));
+            else
+                value=struct('speed',values(2),'angularVelocity',values(3));
+            end
+        end
+
+        function simulate(obj,dt)
+            v=obj.lastCommand(1);
+            w=obj.lastCommand(2);
+            a=obj.simulationPose(3);
+            if abs(w)<1e-10
+                obj.simulationPose(1:2)=obj.simulationPose(1:2)+v*dt*[cos(a) sin(a)];
+            else
+                obj.simulationPose(1:2)=obj.simulationPose(1:2)+ ...
+                    v/w*[sin(a+w*dt)-sin(a), cos(a)-cos(a+w*dt)];
+            end
+            obj.simulationPose(3)=a+w*dt;
+            obj.simulationTime=obj.simulationTime+dt;
+            if obj.settings.odometryType=="position&orientation"
+                value=struct('position',obj.simulationPose(1:2).','orientation',obj.simulationPose(3));
+            else
+                value=struct('speed',v,'angularVelocity',w);
+            end
+            obj.acceptObservation(value,obj.simulationTime);
+        end
+    end
 end

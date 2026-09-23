@@ -3,7 +3,7 @@
 
 Example:
     python dummy_udp_vehicle.py --manager-ip 127.0.0.1 --odometry-port 12345 \
-        --command-port 23456 --odometry-type "speed&angularVelocity" --rate-hz 20
+        --command-port 34567 --odometry-type "speed&angularVelocity" --rate-hz 20
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--odometry-type",
         default="speed&angularVelocity",
-        choices=["position&orientation", "speed&angularVelocity", "velocity&angularVelocity"],
+        choices=["position&orientation", "speed&angularVelocity"],
     )
     parser.add_argument("--rate-hz", type=float, default=20.0)
     return parser.parse_args()
@@ -59,8 +59,9 @@ def main() -> None:
     x = 0.0
     y = 0.0
     theta = 0.0
-    v = 0.5
-    w = 0.3
+    v = 0.0
+    w = 0.0
+    last_command = 0.0
     seq = 0
 
     try:
@@ -87,8 +88,13 @@ def main() -> None:
                 except BlockingIOError:
                     break
                 command = unpack_doubles(data)
-                if command:
-                    print(f"Received command: {command}")
+                if len(data) == 16 and len(command) == 2 and all(map(math.isfinite, command)):
+                    v, w = command
+                    last_command = time.perf_counter()
+
+            if time.perf_counter() - last_command > 0.25:
+                v = 0.0
+                w = 0.0
 
             elapsed = time.perf_counter() - start
             sleep_time = dt - elapsed
