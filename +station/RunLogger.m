@@ -7,6 +7,7 @@ classdef RunLogger < handle
     properties (Access = private)
         saveRunLog logical
         finished logical = false
+        clock
     end
 
     methods
@@ -14,6 +15,7 @@ classdef RunLogger < handle
             % 開始時に、実行日時、mode、車両の並び、確定済み設定、制御則名を受け取る。
             % 状態列と指令列の順序を結果の中に保持する。
             obj.saveRunLog = logical(saveRunLog);
+            obj.clock = tic;
             names = string({settings.name});
             loggedExperiment = experiment;
             loggedExperiment.controllerName = string(func2str(experiment.controller));
@@ -33,6 +35,8 @@ classdef RunLogger < handle
                 'shutdownErrors', strings(0,1), 'logFilePath', "", ...
                 'stateComponents', ["x","y","yaw","speed","angularVelocity"], ...
                 'commandComponents', ["speed","angularVelocity"]);
+            obj.result.diagnostics = struct('phase', {}, 'elapsedSeconds', {}, ...
+                'durationSeconds', {}, 'vehicles', {});
             % 同じ名前のログを上書きしない保存先を決める。
             if obj.saveRunLog
                 if ~isfolder(station.logDirectory), mkdir(station.logDirectory); end
@@ -51,6 +55,13 @@ classdef RunLogger < handle
             obj.result.odometryFresh(index,:) = odometryFresh;
             obj.result.commands(index,:,:) = commands;
             obj.result.commandSent(index,:) = commandSent;
+        end
+
+        % 運転前も別系列で記録する。elapsedSeconds は logger 作成からの実時間。
+        function recordDiagnostics(obj, phase, durationSeconds, vehicles)
+            entry = struct('phase', string(phase), 'elapsedSeconds', toc(obj.clock), ...
+                'durationSeconds', durationSeconds, 'vehicles', vehicles);
+            obj.result.diagnostics(end+1) = entry;
         end
 
         % 終了を知らされたら、status、エラー全文、停止時の個別エラー、

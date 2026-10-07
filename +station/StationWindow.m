@@ -5,6 +5,9 @@ classdef StationWindow < handle
         figureHandle = []
     end
     properties (Access = private)
+        ready logical = false
+        startButton = []
+        guidanceLabel = []
         started logical = false
         stopRequested logical = false
     end
@@ -13,7 +16,7 @@ classdef StationWindow < handle
         function obj = StationWindow(mode, names)
             % 画面を作り、対象車両名と現在の段階を表示する。
             % 開始時は started=false、stopRequested=false としておく。
-            % 接続と座標初期化が終わってから画面を作り、Start を表示する。
+            % 重い画面初期化を先に済ませ、準備完了まで Start を無効にする。
             % この画面から車両へ指令を送らず、状態変更だけを伝える。
             obj.started = string(mode) == "simulation";
             obj.figureHandle = figure('Name', 'Control station', ...
@@ -24,19 +27,27 @@ classdef StationWindow < handle
                 'Position', [20 135 440 25], ...
                 'String', char(string(mode) + " | " + strjoin(string(names), ", ")));
             if string(mode) == "experiment"
-                guidance = 'Startで制御を開始します。Stopまたは閉じると中止します。';
+                guidance = '準備中です。状態受信を確認しています。Stopで中止します。';
             else
                 guidance = 'シミュレーション中です。Stopまたは閉じると停止します。';
             end
-            uicontrol(obj.figureHandle, 'Style', 'text', ...
+            obj.guidanceLabel = uicontrol(obj.figureHandle, 'Style', 'text', ...
                 'Position', [20 85 440 40], 'String', guidance);
-            startButton = uicontrol(obj.figureHandle, 'Style', 'pushbutton', ...
+            obj.startButton = uicontrol(obj.figureHandle, 'Style', 'pushbutton', ...
                 'String', 'Start', 'Position', [60 25 140 45], ...
                 'Callback', @(button,~) obj.requestStart(button));
-            if obj.started, set(startButton, 'Enable', 'off'); end
+            set(obj.startButton, 'Enable', 'off');
             uicontrol(obj.figureHandle, 'Style', 'pushbutton', ...
                 'String', 'Stop', 'Position', [240 25 140 45], ...
                 'Callback', @(~,~) obj.requestStop());
+        end
+
+        function markReady(obj)
+            if obj.stopRequested || ~isgraphics(obj.figureHandle), return; end
+            obj.ready = true;
+            set(obj.guidanceLabel, 'String', ...
+                'Startで制御を開始します。Stopまたは閉じると中止します。');
+            set(obj.startButton, 'Enable', 'on');
         end
 
         % StationRunner から問い合わせられたら、現在の二つの値を返す。
@@ -67,6 +78,7 @@ classdef StationWindow < handle
     methods (Access = private)
         % 実機の待機段階で Start が押されたら started=true にする。
         function requestStart(obj, button)
+            if ~obj.ready || obj.stopRequested, return; end
             obj.started = true;
             set(button, 'Enable', 'off');
         end

@@ -149,6 +149,34 @@ function testOlderStampedOdometryIsIgnored(testCase)
     verifyNotEmpty(testCase, next);
     verifyEqual(testCase, next.value.position(1), 11);
     verifyGreaterThan(testCase, next.number, first.number);
+    details = source.diagnostics();
+    verifyGreaterThanOrEqual(testCase, details.rejectedStampCount, 2);
+    verifyEqual(testCase, details.lastAcceptedStamp, 11);
+    verifyEqual(testCase, details.receivedCount, ...
+        details.acceptedCount + details.rejectedStampCount + details.rejectedValueCount);
+end
+
+function testInvalidOtosDoesNotRenewObservation(testCase)
+    settings = shared.resolveVehicleSettings(shared.vehicleCatalog(), shared.experimentConfig(), ...
+        shared.stationConfig(), "simulation", "pi3");
+    settings.odometryInput.topic = "/station_new_test/invalid_otos";
+    source = station.RosOdometrySource(settings.odometryInput, tic);
+    publisher = rospublisher(char(settings.odometryInput.topic), ...
+        'geometry_msgs/Pose2D', 'DataFormat', 'struct');
+    cleanup = onCleanup(@() releaseSource(source, publisher)); %#ok<NASGU>
+    pause(1);
+    message = rosmessage(publisher);
+    message.X = NaN;
+    for index = 1:50
+        send(publisher, message);
+        pause(0.02);
+        details = source.diagnostics();
+        if details.rejectedValueCount > 0, break; end
+    end
+    verifyGreaterThan(testCase, details.rejectedValueCount, 0);
+    verifyEqual(testCase, details.acceptedCount, 0);
+    verifyEqual(testCase, details.rejectedStampCount, 0);
+    verifyEmpty(testCase, source.read());
 end
 
 function testWheelOdometryVelocityInput(testCase)

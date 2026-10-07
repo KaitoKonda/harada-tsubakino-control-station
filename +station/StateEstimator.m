@@ -78,6 +78,15 @@ classdef StateEstimator < handle
                 now - obj.observationTime <= obj.timeout;
         end
 
+        % 判定に用いた時計と採用済み測定を、受信を進めずに診断へ渡す。
+        function details = diagnostics(obj, now)
+            details = struct('checkedAtSeconds', now, ...
+                'receivedAtSeconds', obj.observationTime, ...
+                'ageSeconds', now - obj.observationTime, ...
+                'sampleNumber', obj.sampleNumber, ...
+                'timeoutSeconds', obj.timeout, 'fresh', obj.isFresh(now));
+        end
+
         % calibrate では最初の有効な測定を受け取る。
         % Motive は共通座標をそのまま使い、OTOS はこの測定を指定初期位置に合わせる。
         function calibrate(obj, now)

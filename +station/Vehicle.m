@@ -62,9 +62,17 @@ classdef Vehicle < handle
             if ~isempty(sample), obj.estimator.accept(sample); end
         end
 
-        function fresh = hasFreshObservation(obj)
+        function [fresh, details] = hasFreshObservation(obj)
             obj.poll();
-            fresh = obj.estimator.isFresh(obj.now());
+            details = obj.odometryDiagnostics();
+            fresh = details.fresh;
+        end
+
+        function details = odometryDiagnostics(obj)
+            details = obj.estimator.diagnostics(obj.now());
+            if isa(obj.source, 'station.RosOdometrySource')
+                details.ros = obj.source.diagnostics();
+            end
         end
 
         % calibrate が呼ばれたら、入力源から届いた最新の有効な測定を調べる。
@@ -77,10 +85,17 @@ classdef Vehicle < handle
         % update(dt) では simulation なら最初に模擬車両を dt だけ進める。
         % 入力源から新しい測定を受け取り、あれば StateEstimator に渡す。
         % その時点の鮮度と [x, y, yaw, speed, angularVelocity] を返す。
-        function fresh = update(obj, dt)
+        function [fresh, details] = update(obj, dt)
             if obj.mode == "simulation", obj.source.step(dt); end
             obj.poll();
-            fresh = obj.estimator.update(dt, obj.now());
+            now = obj.now();
+            fresh = obj.estimator.update(dt, now);
+            if nargout > 1
+                details = obj.estimator.diagnostics(now);
+                if isa(obj.source, 'station.RosOdometrySource')
+                    details.ros = obj.source.diagnostics();
+                end
+            end
         end
 
         function state = snapshot(obj)

@@ -47,26 +47,47 @@ classdef StationRunner < handle
                     fprintf('ROS マスターに接続しました。ローバと必要なブリッジを起動してください。\n');
                     input('起動を確認したら Enter キーを押してください: ', 's');
                 end
+                % 受信監視を始める前に、重い画面生成と初回描画を済ませる。
+                if obj.showUi
+                    uiClock = tic;
+                    obj.controlWindow = obj.createControlWindow();
+                    obj.positionMap = obj.createPositionMap();
+                    drawnow;
+                    obj.logger.recordDiagnostics("uiInitialized", toc(uiClock), struct());
+                end
                 % 選択順に Vehicle を作る。途中の一台で失敗したら、作成済みの全台を閉じる。
                 for setting = obj.settings
-                    obj.vehicles.(char(setting.name)) = station.Vehicle(setting, obj.mode, ...
-                        obj.station.odometryTimeoutSeconds);
+                    obj.vehicles.(char(setting.name)) = obj.createVehicle(setting);
                 end
                 if obj.mode == "experiment"
-                    obj.waitForConnections();
+                    obj.waitForConnections("connecting", false);
+                    if obj.status == "cancelled"
+                        obj.finish();
+                        result = obj.logger.result;
+                        return
+                    end
                 end
                 % 全台に期限内の有効な状態が揃ったら、各 Vehicle の calibrate を呼ぶ。
                 % simulation では模擬車両から初期測定を一回作り、待たずに calibrate する。
                 for name = obj.names
                     obj.vehicles.(char(name)).calibrate();
                 end
-                % 画面を作り、実機なら standby に入る。
+                % 校正位置を初めて描く処理も、Start を許可する前に完了させる。
                 if obj.showUi
-                    obj.controlWindow = station.StationWindow(obj.mode, obj.names);
-                    obj.positionMap = station.PositionMap(obj.names);
+                    mapClock = tic;
                     obj.updatePositionMap();
+                    drawnow;
+                    obj.logger.recordDiagnostics("initialMapDrawn", toc(mapClock), struct());
                 end
                 if obj.mode == "experiment"
+                    % 描画前の測定を再利用せず、描画後の新測定を期限付きで待つ。
+                    obj.waitForConnections("ready", true);
+                    if obj.status == "cancelled"
+                        obj.finish();
+                        result = obj.logger.result;
+                        return
+                    end
+                    obj.controlWindow.markReady();
                     obj.waitForStart();
                     if obj.status == "cancelled"
                         obj.finish();
@@ -129,24 +150,55 @@ classdef StationRunner < handle
         end
     end
 
+    methods (Access = protected)
+        % 入出力と画面の生成を分け、遅い描画や受信停止を実機なしで検証できるようにする。
+        function vehicle = createVehicle(obj, setting)
+            vehicle = station.Vehicle(setting, obj.mode, obj.station.odometryTimeoutSeconds);
+        end
+
+        function window = createControlWindow(obj)
+            window = station.StationWindow(obj.mode, obj.names);
+        end
+
+        function map = createPositionMap(obj)
+            map = station.PositionMap(obj.names);
+        end
+    end
+
     methods (Access = private)
         % 接続待ちでは、各車両へゼロ指令を試み、状態入力を一台ずつ読む。
         % 制限時間を超えたら届かなかった車両名を示し、運転を始めず終了する。
-        function waitForConnections(obj)
+        function waitForConnections(obj, phase, requireNew)
             started = tic;
             ready = false(1, numel(obj.names));
+            notBefore = -Inf(1, numel(obj.names));
+            if requireNew
+                for index = 1:numel(obj.names)
+                    details = obj.vehicles.(char(obj.names(index))).odometryDiagnostics();
+                    notBefore(index) = details.checkedAtSeconds;
+                end
+            end
             while toc(started) < obj.station.connectionTimeoutSeconds
+                if ~isempty(obj.controlWindow) && obj.controlWindow.shouldStop()
+                    obj.status = "cancelled";
+                    return
+                end
                 errors = obj.stopAll();
                 assert(isempty(errors), 'Station:StopFailed', ...
                     'Could not maintain zero commands during connection.');
+                observations = struct();
                 for index = 1:numel(obj.names)
-                    ready(index) = obj.vehicles.(char(obj.names(index))).hasFreshObservation();
+                    name = char(obj.names(index));
+                    [fresh, details] = obj.vehicles.(name).hasFreshObservation();
+                    observations.(name) = details;
+                    ready(index) = fresh && details.receivedAtSeconds >= notBefore(index);
                 end
+                obj.logger.recordDiagnostics(phase, toc(started), observations);
                 if all(ready), return; end
                 pause(1/obj.station.controlRateHz);
             end
             error('Station:ConnectionTimeout', ...
-                'No fresh odometry from: %s', strjoin(obj.names(~ready), ', '));
+                'No fresh odometry during %s from: %s', phase, strjoin(obj.names(~ready), ', '));
         end
 
         % standby 中はゼロ指令と状態更新を繰り返す。
@@ -155,7 +207,10 @@ classdef StationRunner < handle
         function waitForStart(obj)
             obj.status = "standby";
             previous = tic;
-            while ~obj.controlWindow.isStarted()
+            while true
+                % 操作画面の描画後、最初の判定前にも ROS コールバックへ実行機会を渡す。
+                startRequested = obj.controlWindow.isStarted();
+                pause(1/obj.station.controlRateHz);
                 if obj.controlWindow.shouldStop()
                     obj.status = "cancelled";
                     return
@@ -165,13 +220,22 @@ classdef StationRunner < handle
                     'Could not maintain zero commands in standby.');
                 dt = toc(previous);
                 previous = tic;
+                observations = struct();
                 for name = obj.names
-                    odometryFresh = obj.vehicles.(char(name)).update(dt);
-                    assert(odometryFresh, 'Station:OdometryLost', ...
-                        'Odometry lost during standby for %s.', name);
+                    [~, details] = obj.vehicles.(char(name)).update(dt);
+                    observations.(char(name)) = details;
                 end
+                % assert より前に保存し、失敗した最初の周期も残す。
+                obj.logger.recordDiagnostics("standby", dt, observations);
+                for name = obj.names
+                    details = observations.(char(name));
+                    assert(details.fresh, 'Station:OdometryLost', ...
+                        ['Odometry lost during standby for %s. ' ...
+                         'Age %.3f s exceeds timeout %.3f s (sample %.0f).'], ...
+                        name, details.ageSeconds, details.timeoutSeconds, details.sampleNumber);
+                end
+                if startRequested, return; end
                 obj.updatePositionMap();
-                pause(1/obj.station.controlRateHz);
             end
         end
 
@@ -201,13 +265,15 @@ classdef StationRunner < handle
                 odometryFresh = false(1,count);
                 commandsArray = zeros(1,2,count);
                 commandSent = false(1,count);
+                observations = struct();
                 % 選択順に全 Vehicle を update し、状態と odometryFresh を結果へ記録する。
                 for index = 1:count
                     vehicle = obj.vehicles.(char(obj.names(index)));
-                    odometryFresh(index) = vehicle.update(dt);
+                    [odometryFresh(index), details] = vehicle.update(dt);
+                    observations.(char(obj.names(index))) = details;
                     states(1,:,index) = vehicle.snapshot();
                 end
-                if obj.showUi, obj.positionMap.update(states); end
+                obj.logger.recordDiagnostics("running", dt, observations);
                 % 一台でも odometryFresh が偽なら、その車両名を記録して odometryLost とする。
                 if ~all(odometryFresh)
                     obj.status = "odometryLost";
@@ -234,6 +300,7 @@ classdef StationRunner < handle
                     end
                 end
                 obj.logger.record(elapsed, states, odometryFresh, commandsArray, commandSent);
+                if obj.showUi, obj.positionMap.update(states); end
                 if elapsed >= nextReport
                     fprintf('%s: %.1f / %.1f s (%d vehicles)\n', ...
                         obj.mode, elapsed, obj.station.durationSeconds, count);

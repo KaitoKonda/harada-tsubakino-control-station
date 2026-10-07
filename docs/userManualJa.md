@@ -72,7 +72,7 @@ ROS トピックは車両名が `pi1` なら、Motive が `/pi1/odometry/motive`
 
 ### 3.6 二次元の位置表示を見る
 
-Start / Stop 画面と同時に「Vehicle position map」ウィンドウが開きます。横軸は x、縦軸は y で、単位は m です。色付きの点が車両の現在位置、矢印が車両の向き、文字が車両名を表します。実機では Start 前の待機中から位置を更新します。車両が表示範囲の端に近づくと座標軸が広がります。地図のウィンドウを閉じても運転は続くため、運転を止めるときは Start / Stop 画面の Stop を押してください。
+Start / Stop 画面と同時に「Vehicle position map」ウィンドウが開きます。実機の Start は準備中には無効です。画面生成・状態受信・校正・初回位置描画を終え、描画後の新しい測定を確認すると有効になります。準備中も Stop または操作画面を閉じると中止できます。横軸は x、縦軸は y で、単位は m です。色付きの点が車両の現在位置、矢印が車両の向き、文字が車両名を表します。実機では Start 前の待機中から位置を更新します。車両が表示範囲の端に近づくと座標軸が広がります。地図のウィンドウを閉じても運転は続くため、運転を止めるときは Start / Stop 画面の Stop を押してください。
 
 表示する値は状態入力に応じて決まる推定位置です。複数の車両を同じ画面で比較する場合は、それぞれの設定が同じ座標系を表すようにしてください。車輪オドメトリの位置は車輪速度の積分値なので、滑りなどによるずれが蓄積しえます。
 
@@ -170,3 +170,26 @@ Start / Stop 画面と同時に「Vehicle position map」ウィンドウが開�
 - 実験中に新しい状態が届かなくなったら、全車両へのゼロ指令を試みて終了する。自動再開しない。
 - ログには、選択した車両と実際に使用した設定、時刻、状態、指令、終了理由を残す。
 - MATLAB R2026a でシミュレーション、UDP の PC 内送受信、ROS の PC 内送受信を確認した。Motive の実フレーム受信、別 PC 間の通信、実機走行と停止は現地で別途確認する。
+
+### 起動・待機中の受信エラーを調べる
+
+ログの `result.diagnostics` は運転開始前も記録します。`phase` は `uiInitialized`（画面生成と初回描画）、`connecting`（最初の受信確認）、`initialMapDrawn`（校正後の初回位置描画）、`ready`（描画後の新測定待ち）、`standby`、`running` です。`ready` の途中の記録は準備完了を意味しません。
+
+`durationSeconds` は描画イベントでは描画所要時間、受信待ちではその待ち開始からの経過時間、standby/running では周期の時間差です。`diagnostics.elapsedSeconds` はログ作成からの実時間で、Enter 入力待ちも含みます。既存の `result.elapsedSeconds`（運転開始からの時間）とは別の系列です。
+
+例えばエラーで保存されたログを確認します。
+
+```matlab
+saved = load("logs/対象のログ.mat", "result");
+d = saved.result.diagnostics;
+d([d.phase] == "uiInitialized")
+d([d.phase] == "initialMapDrawn")
+k = find([d.phase] == "standby", 1, "last");
+if ~isempty(k)
+    d(k).vehicles.pi3
+end
+```
+
+車両ごとの `ageSeconds` は採用した最終測定からの時間、`timeoutSeconds` は有効期限、`sampleNumber` は測定番号、`fresh` はその周期での鮮度判定です。未受信時の age は Inf になります。`checkedAtSeconds` と `receivedAtSeconds` は各 Vehicle の作成時を基準にした時計です。
+
+ROS の場合はさらに `vehicles.pi3.ros` にコールバック実行数（`receivedCount`）、有効測定の採用数（`acceptedCount`）、ヘッダー時刻と値による棄却数（`rejectedStampCount`、`rejectedValueCount`）を残します。コールバック実行数はネットワーク上の受信パケット数ではありません。数が止まった場合は配信停止・通信・MATLAB の処理遅延を別途確認し、棄却数だけが増える場合は配信値や Header.Stamp を確認します。

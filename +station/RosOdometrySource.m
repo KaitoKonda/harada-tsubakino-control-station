@@ -11,6 +11,10 @@ classdef RosOdometrySource < handle
         sampleNumber double = 0
         deliveredNumber double = 0
         lastStamp double = NaN
+        receivedCount double = 0
+        rejectedStampCount double = 0
+        rejectedValueCount double = 0
+        lastMessageAt double = -Inf
     end
 
     methods
@@ -32,6 +36,15 @@ classdef RosOdometrySource < handle
             obj.deliveredNumber = obj.sampleNumber;
         end
 
+        function details = diagnostics(obj)
+            details = struct('receivedCount', obj.receivedCount, ...
+                'acceptedCount', obj.sampleNumber, ...
+                'rejectedStampCount', obj.rejectedStampCount, ...
+                'rejectedValueCount', obj.rejectedValueCount, ...
+                'lastMessageAtSeconds', obj.lastMessageAt, ...
+                'lastAcceptedStamp', obj.lastStamp);
+        end
+
         % close が呼ばれたら subscriber を解放する。ROS 全体は止めない。
         function close(obj)
             if ~isempty(obj.subscriber)
@@ -49,17 +62,25 @@ classdef RosOdometrySource < handle
         % 有効な時刻ヘッダーが前回以前なら、新測定にしない。
         % ヘッダーがないメッセージは、受け取った実時刻で新旧を区別する。
         function acceptMessage(obj, message)
+            obj.receivedCount = obj.receivedCount + 1;
+            obj.lastMessageAt = toc(obj.clock);
             stamp = NaN;
             if isfield(message, 'Header')
                 stamp = double(message.Header.Stamp.Sec) + ...
                     double(message.Header.Stamp.Nsec) * 1e-9;
-                if ~isfinite(stamp) || stamp < 0, return; end
-                if stamp > 0 && stamp <= obj.lastStamp, return; end
+                if ~isfinite(stamp) || stamp < 0 || ...
+                        (stamp > 0 && stamp <= obj.lastStamp)
+                    obj.rejectedStampCount = obj.rejectedStampCount + 1;
+                    return
+                end
             end
             % メッセージが届いたら、設定された位置入力か速度入力かを確認する。
             % 有効な測定だけを値、受信時刻、測定番号として保持する。
             value = obj.parseMessage(message);
-            if isempty(value), return; end
+            if isempty(value)
+                obj.rejectedValueCount = obj.rejectedValueCount + 1;
+                return
+            end
             if isfinite(stamp) && stamp > 0, obj.lastStamp = stamp; end
             obj.sampleNumber = obj.sampleNumber + 1;
             obj.latest = struct('value', value, ...
