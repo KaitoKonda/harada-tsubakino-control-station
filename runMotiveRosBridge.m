@@ -1,51 +1,67 @@
 % runMotiveRosBridge：Motive ブリッジを始める入口。
-
 function runMotiveRosBridge(station, experiment, selectedNames)
-    % stationConfig、experimentConfig、vehicleCatalog を読み込む。
     if nargin < 1 || isempty(station), station = shared.stationConfig(); end
-    if nargin < 2 || isempty(experiment), experiment = shared.experimentConfig(); end
-    if nargin < 3, selectedNames = strings(0,1); end
-    % resolveVehicleSettings を呼び、今回の車両設定を確定する。
-    settings = shared.resolveVehicleSettings(shared.vehicleCatalog(), experiment, ...
-        station, "bridge", selectedNames);
-    % 状態入力として Motive を選んだ車両だけを取り出す。
-    % 対象が一台もなければ、そのことを表示して接続せず終了する。
-    usesMotive = arrayfun(@(s) s.odometrySource == "motive", settings);
-    motiveSettings = settings(usesMotive);
-    assert(~isempty(motiveSettings), 'Motive:NoMappings', ...
-        'No selected vehicle uses Motive odometry.');
-    % 対象の車両名、剛体名または ID、配信先トピックを一覧表示する。
-    for vehicle = motiveSettings
-        fprintf('%s: Motive %s (ID %g) -> %s\n', vehicle.name, ...
-            vehicle.motive.name, vehicle.motive.id, vehicle.odometryInput.topic);
-    end
-    % 共有 ROS 接続を確認してから MotiveRosBridge を作る。
-    % 作成に失敗したら、開きかけた資源を閉じてエラーの段階を示す。
-    % 共有 ROS マスターは、他の利用者がいる可能性があるため勝手に止めない。
-    shared.ensureRosSession(station.ros);
-    bridgeInstance = bridge.MotiveRosBridge(station.motive, motiveSettings);
-    % Ctrl+C、例外、通常終了のどれでもブリッジの close を一回試みる。
-    cleanup = onCleanup(@() bridgeInstance.close()); %#ok<NASGU>
-    % 成功したら Ctrl+C で止められることを表示する。
-    fprintf('Motive bridge is running. Press Ctrl+C to stop.\n');
-    % pollRateHz から次の更新時刻を求め、MotiveRosBridge.update を繰り返す。
-    period = 1 / station.motive.pollRateHz;
-    lastReport = tic;
-    while true
-        step = tic;
-        % 取得できない状態が続いても、前の位置を新しい測定として送らない。
-        stats = bridgeInstance.update();
-        % 戻った取得数、対象数、配信数を一定間隔で表示する。
-        if toc(lastReport) >= 1
-            fprintf('frameNumber=%g receivedCount=%d matchedCount=%d trackedCount=%d publishedCount=%d invalidCount=%d\n', ...
-                stats.frameNumber, stats.receivedCount, stats.matchedCount, ...
-                stats.trackedCount, stats.publishedCount, stats.invalidCount);
-            if stats.invalidCount > 0
-                fprintf('  Invalid rigid bodies: %s\n', ...
-                    strjoin(stats.invalidReasons, '; '));
-            end
-            lastReport = tic;
+    diagnostics = bridge.BridgeDiagnostics(station.motive, station.logDirectory);
+    logCleanup = onCleanup(@() diagnostics.close()); %#ok<NASGU>
+    stage = "configuration";
+    try
+        diagnostics.log('[START] NatNet client=%s server=%s type=%s', ...
+            station.motive.clientIp, station.motive.serverIp, station.motive.connectionType);
+        diagnostics.log('[START] ROS master=%s nodeHost=%s', station.ros.masterUri, station.ros.nodeHost);
+        if nargin < 2 || isempty(experiment), experiment = shared.experimentConfig(); end
+        if nargin < 3, selectedNames = strings(0,1); end
+        settings = shared.resolveVehicleSettings(shared.vehicleCatalog(), experiment, ...
+            station, "bridge", selectedNames);
+        motiveSettings = settings(arrayfun(@(s) s.odometrySource == "motive", settings));
+        assert(~isempty(motiveSettings), 'Motive:NoMappings', ...
+            'No selected vehicle uses Motive odometry.');
+        for vehicle = motiveSettings
+            diagnostics.log('[REQUEST] vehicle=%s rigidBody=%s configuredID=%g topic=%s', ...
+                vehicle.name, vehicle.motive.name, vehicle.motive.id, vehicle.odometryInput.topic);
         end
-        pause(max(0, period - toc(step)));
+        stage = "ROS connection";
+        shared.ensureRosSession(station.ros);
+        diagnostics.log('[OK] ROS session ready');
+        stage = "NatNet connection / model description";
+        source = bridge.NatNetFrameSource(station.motive);
+        sourceCleanup = onCleanup(@() closeResource(source, diagnostics)); %#ok<NASGU>
+        diagnostics.log('[OK] NatNet connected');
+        model = source.model;
+        if isstruct(model) && isfield(model, 'RigidBodyCount') && isfield(model, 'RigidBody')
+            diagnostics.log('[MODEL] rigidBodies=%d', model.RigidBodyCount);
+            for index = 1:min(double(model.RigidBodyCount), numel(model.RigidBody))
+                body = model.RigidBody(index);
+                diagnostics.log('[MODEL] %s(ID=%g)', string(body.Name), double(body.ID));
+            end
+        end
+        stage = "rigid-body mapping / ROS publishers";
+        bridgeInstance = bridge.MotiveRosBridge(station.motive, motiveSettings, source);
+        bridgeCleanup = onCleanup(@() closeResource(bridgeInstance, diagnostics)); %#ok<NASGU>
+        diagnostics.configure(bridgeInstance.mappings);
+        diagnostics.log('[READY] pollTarget=%gHz frameId=%s; published counts send() completions, not subscriber receipts. Press Ctrl+C to stop.', ...
+            station.motive.pollRateHz, station.motive.frameId);
+        period = 1 / station.motive.pollRateHz;
+        while true
+            step = tic;
+            stage = "frame acquisition / decode / ROS publish";
+            stats = bridgeInstance.update();
+            stage = "diagnostics";
+            diagnostics.observe(stats);
+            pause(max(0, period - toc(step)));
+        end
+    catch exception
+        diagnostics.logException(exception, stage);
+        rethrow(exception)
+    end
+
+end
+
+function closeResource(resource, diagnostics)
+    % 匿名関数にハンドルを保持し、Ctrl+C・例外でも資源を解放する。
+    % 共有 ROS セッションは停止しない。
+    try
+        resource.close();
+    catch exception
+        diagnostics.logException(exception, "cleanup");
     end
 end

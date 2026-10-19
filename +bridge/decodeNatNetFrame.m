@@ -3,7 +3,8 @@
 function decoded = decodeNatNetFrame(frame)
     decoded = struct('frameNumber', NaN, 'bodies', ...
         struct('id', {}, 'position', {}, 'quaternion', {}, 'tracked', {}), ...
-        'invalidCount', 0, 'invalidReasons', strings(0,1));
+        'invalidCount', 0, 'invalidReasons', strings(0,1), ...
+        'receivedIds', [], 'invalidBodies', struct('index', {}, 'id', {}, 'reason', {}));
     % 空のフレームなら「受信なし」を返す。
     if isempty(frame), return; end
     % フレームの型を調べ、公式プラグインの生フレーム形式か確認する。
@@ -31,9 +32,13 @@ function decoded = decodeNatNetFrame(frame)
     % 配列の要素を一つずつ読み、ID、x/y/z、qx/qy/qz/qw を数値へ変える。
     for index = 1:count
         reason = "";
+        id = NaN;
         try
             raw = rawBodies(index);
             id = double(raw.ID);
+            if isscalar(id) && isfinite(id)
+                decoded.receivedIds(end+1) = id; %#ok<AGROW>
+            end
             position = double([raw.x raw.y raw.z]);
             quaternion = double([raw.qx raw.qy raw.qz raw.qw]);
             % 同梱 NatNetML.dll の RigidBodyData に Boolean 型の Tracked がある。
@@ -44,12 +49,27 @@ function decoded = decodeNatNetFrame(frame)
             valid = isscalar(id) && isfinite(id) && ...
                 all(isfinite(position)) && all(isfinite(quaternion)) && ...
                 norm(quaternion) > eps && isscalar(tracked);
-            if ~valid, reason = "non-finite pose, invalid ID, or zero quaternion"; end
+            if ~valid
+                if ~isscalar(id) || ~isfinite(id)
+                    reason = "invalid ID";
+                elseif ~all(isfinite(position))
+                    reason = "non-finite position";
+                elseif ~all(isfinite(quaternion))
+                    reason = "non-finite quaternion";
+                elseif norm(quaternion) <= eps
+                    reason = "invalid quaternion; norm=" + string(norm(quaternion));
+                else
+                    reason = "invalid tracking flag";
+                end
+            end
         catch exception
             valid = false;
             reason = string(exception.message);
         end
         if ~valid
+            if ~isscalar(id) || ~isfinite(id), id = NaN; end
+            decoded.invalidBodies(end+1) = struct( ...
+                'index', index, 'id', id, 'reason', reason); %#ok<AGROW>
             decoded.invalidCount = decoded.invalidCount + 1;
             decoded.invalidReasons(end+1,1) = ...
                 "rigid body " + string(index) + ": " + reason; %#ok<AGROW>

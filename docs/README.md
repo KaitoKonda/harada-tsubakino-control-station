@@ -3,6 +3,7 @@
 | 文書 | 内容 |
 | --- | --- |
 | [利用マニュアル](userManualJa.md) | 制御ステーションの設定と操作 |
+| [バックステッピング制御の理論](backsteppingController.md) | leader 方式の階層化最適制御と入力変換 |
 | [OptiTrack MATLAB Plugin の導入](optitrackMatlab.md) | Plugin と Motive 配信の準備 |
 | [Motive–ROS 最小接続試験](minimumConnectionTest.md) | NatNet、ROS、ブリッジを順に確認する手順 |
 | [剛体トラッキング](rigidBodyTrackingJa.md)（[英語](rigidBodyTrackingEn.md)） | Motive で剛体を作成・追跡するための参考資料 |

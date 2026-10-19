@@ -114,7 +114,7 @@ Start / Stop 画面と同時に「Vehicle position map」ウィンドウが開�
    disp(message.Pose.Pose.Position)
    ```
 
-   剛体を少し動かして再度 `message = receive(subscriber, 5);` を実行し、位置と時刻が更新されることを確認します。ブリッジの `publishedCount` が増えても、購読側で受け取るまでは合格としません。
+   剛体を少し動かして再度 `message = receive(subscriber, 5);` を実行し、位置と時刻が更新されることを確認します。ブリッジの区間集計で `published>0` でも、購読側で受け取るまでは合格としません。未配信理由とログ保存先は [Motive ブリッジの診断ログ](motiveBridgeDiagnosticsJa.md)を参照してください。
 6. ここで失敗した場合は実機制御へ進まず、最後に成功した段階を記録します。終了時は MATLAB A で Ctrl+C を押し、両方の MATLAB で必要に応じて `rosshutdown` を実行します。NatNet 単体・ROS 単体の操作例は [Motive–ROS 最小接続試験](minimumConnectionTest.md)を参照してください。
 
 ### 手順 C：実機を接続する

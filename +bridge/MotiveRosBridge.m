@@ -10,8 +10,10 @@ classdef MotiveRosBridge < handle
     end
 
     methods
-        function obj = MotiveRosBridge(motiveConfig, vehicleSettings, frameSource)
+        function obj = MotiveRosBridge(motiveConfig, vehicleSettings, frameSource, publisherFactory)
             obj.frameId = string(motiveConfig.frameId);
+            % テストでは外部通信しない publisher を注入できる。
+            if nargin < 4, publisherFactory = @(topic) bridge.RosOdometryPublisher(topic); end
             try
                 % NatNetFrameSource を開き、モデル記述の剛体名と ID を取得する。
                 if nargin < 3 || isempty(frameSource)
@@ -25,7 +27,7 @@ classdef MotiveRosBridge < handle
                 % 対応が確定した各トピックについて RosOdometryPublisher を作る。
                 obj.publishers = cell(1, numel(obj.mappings));
                 for index = 1:numel(obj.mappings)
-                    obj.publishers{index} = bridge.RosOdometryPublisher(obj.mappings(index).topic);
+                    obj.publishers{index} = publisherFactory(obj.mappings(index).topic);
                 end
             % 接続や照合に失敗したら開いた資源を閉じ、元の例外を伝える。
             catch exception
@@ -38,7 +40,11 @@ classdef MotiveRosBridge < handle
         function stats = update(obj)
             stats = struct('frameNumber', NaN, 'receivedCount', 0, ...
                 'matchedCount', 0, 'trackedCount', 0, 'publishedCount', 0, ...
-                'invalidCount', 0, 'invalidReasons', strings(0,1));
+                'invalidCount', 0, 'invalidReasons', strings(0,1), ...
+                'frameStatus', "empty", 'receivedIds', [], ...
+                'vehicles', struct('status', {}, 'reason', {}, ...
+                    'positionMotive', {}, 'quaternionMotive', {}, ...
+                    'positionRos', {}, 'quaternionRos', {}));
             % update が呼ばれたら NatNetFrameSource から最新フレームを一つ取る。
             % 空なら「受信なし」を返し、前回の位置は配信しない。
             frame = obj.source.getFrame();
@@ -51,7 +57,24 @@ classdef MotiveRosBridge < handle
             stats.invalidReasons = decoded.invalidReasons;
             % 番号が前回と同じなら「新フレームなし」を返す。
             % 新しい番号なら保存し、剛体一覧を一つずつ見る。
-            if decoded.frameNumber == obj.lastFrameNumber, return; end
+            stats.receivedIds = decoded.receivedIds;
+            if decoded.frameNumber == obj.lastFrameNumber
+                stats.frameStatus = "duplicate";
+                return
+            end
+            stats.frameStatus = "new";
+            for mapping = obj.mappings
+                bad = find([decoded.invalidBodies.id] == mapping.id, 1);
+                status = "missing";
+                reason = "missing from frame; receivedIDs=" + string(mat2str(decoded.receivedIds));
+                if ~isempty(bad)
+                    status = "invalid";
+                    reason = decoded.invalidBodies(bad).reason;
+                end
+                stats.vehicles(end+1) = struct('status', status, 'reason', reason, ...
+                    'positionMotive', [], 'quaternionMotive', [], ...
+                    'positionRos', [], 'quaternionRos', []); %#ok<AGROW>
+            end
             obj.lastFrameNumber = decoded.frameNumber;
             for body = decoded.bodies
                 % 対応表にない剛体は数だけ記録して飛ばす。
@@ -59,16 +82,28 @@ classdef MotiveRosBridge < handle
                 if isempty(mappingIndex), continue; end
                 stats.matchedCount = stats.matchedCount + 1;
                 % 対応表にあっても追跡不可なら配信せず、その件数を増やす。
-                if ~body.tracked, continue; end
+                stats.vehicles(mappingIndex).positionMotive = body.position;
+                stats.vehicles(mappingIndex).quaternionMotive = body.quaternion;
+                if ~body.tracked
+                    stats.vehicles(mappingIndex).status = "untracked";
+                    stats.vehicles(mappingIndex).reason = "tracked=false";
+                    continue
+                end
                 stats.trackedCount = stats.trackedCount + 1;
                 % 追跡中なら MotiveCoordinateTransform で位置と姿勢を変換する。
                 [position, quaternion] = bridge.MotiveCoordinateTransform.toRos( ...
                     body.position, body.quaternion);
+                stats.vehicles(mappingIndex).positionRos = position;
+                stats.vehicles(mappingIndex).quaternionRos = quaternion;
+                stats.vehicles(mappingIndex).status = "suppressed";
+                stats.vehicles(mappingIndex).reason = "publisher suppressed duplicate frame";
                 mapping = obj.mappings(mappingIndex);
                 % 対応する RosOdometryPublisher へ渡し、送信成否を記録する。
                 if obj.publishers{mappingIndex}.publish(position, quaternion, ...
                         obj.frameId, mapping.childFrameId, decoded.frameNumber)
                     stats.publishedCount = stats.publishedCount + 1;
+                    stats.vehicles(mappingIndex).status = "published";
+                    stats.vehicles(mappingIndex).reason = "";
                 end
             end
             % フレーム番号、受信数、対応数、追跡数、配信数を返す。

@@ -99,7 +99,7 @@ experiment = shared.experimentConfig();
 runMotiveRosBridge(stationSettings, experiment, "pi1")
 ```
 
-ブリッジは対象の剛体と ROS トピックを表示し、`frameNumber`、`receivedCount`、`matchedCount`、`trackedCount`、`publishedCount`、`invalidCount` の件数を約 1 秒ごとに表示します。MATLAB A の入力待ち記号 `>>` が戻らないのは、配信を続けているためです。
+ブリッジは接続先、モデル内の剛体、解決済みの剛体 ID と ROS トピックを表示します。`[READY]` は起動完了であり、配信成功は `[OK] ... first publish completed` で確認します。約 1 秒ごとの `[INTERVAL]` は、その区間全体の取得数と車両別配信数です。MATLAB A の入力待ち記号 `>>` が戻らないのは、配信を続けているためです。ログの読み方と設定は [Motive ブリッジの診断ログ](motiveBridgeDiagnosticsJa.md)を参照してください。
 
 MATLAB B で同じ ROS マスターへ接続し、配信先の位置トピックを購読します。
 
@@ -112,7 +112,7 @@ disp(message.Pose.Pose)
 
 剛体を少し動かし、MATLAB B でもう一度 `message = receive(subscriber, 5);` を実行します。位置と `message.Header.Stamp` が更新されることを確かめます。現在の軸変換は Motive の `[X,Y,Z]` を ROS の `[X,-Z,Y]` にします。追跡できない剛体は新しい位置として配信しません。
 
-**合格条件：** MATLAB A で `publishedCount` が増え、MATLAB B で位置と時刻が更新される。A の表示だけで受信成功と判断しません。
+**合格条件：** MATLAB A の区間集計で `published>0` が続き、MATLAB B で位置と時刻が更新される。A の表示だけで受信成功と判断しません。
 
 ## 5. 終了と記録
 
@@ -124,10 +124,10 @@ MATLAB A で Ctrl+C を押し、`>>` が戻るのを待ちます。MATLAB B で 
 | Plugin 付属サンプル | 合格 / 不合格 |
 | NatNet 単体 | 合格 / 不合格 |
 | ROS 同一 PC 内 | 合格 / 不合格 |
-| ブリッジの `publishedCount` |  |
+| ブリッジの区間 `published` とログファイル |  |
 | ROS 購読側の位置・時刻更新 | 合格 / 不合格 |
 | 最後に成功した段階・エラー全文 |  |
 
-失敗したら次の段階へ進まず、最後に成功した段階から調べます。NatNet が失敗した場合は Motive の配信、IP、通信方式と配線を確認します。`matchedCount=0` なら剛体名と ID、`trackedCount=0` なら追跡状態、`publishedCount>0` なのに MATLAB B で受け取れなければ ROS マスターとトピックを確認します。実配信でのフレーム型が想定と違う場合は、エラー全文とプラグインの版を記録してください。
+失敗したら次の段階へ進まず、最後に成功した段階から調べます。NatNet が失敗した場合は Motive の配信、IP、通信方式と配線を確認します。`newFrames=0` なら新規フレームが届いているか、車両別 `missing>0` なら剛体名と ID、`untracked>0` なら追跡状態、`invalid>0` なら警告の具体的な理由を確認します。`published>0` なのに MATLAB B で受け取れなければ ROS マスターとトピックを確認します。`duplicates>0` 自体は異常ではなく、同じフレームを再取得した数です。実配信でのフレーム型が想定と違う場合は、エラー全文とプラグインの版を記録してください。
 
 この試験を通過した後の車両接続手順は[制御ステーション利用マニュアル](userManualJa.md)にあります。

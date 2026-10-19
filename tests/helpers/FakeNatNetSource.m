@@ -3,6 +3,8 @@ classdef FakeNatNetSource < handle
         model
         body
         frameNumber double = 0
+        advanceFrame logical = true
+        returnEmpty logical = false
     end
     methods
         function obj = FakeNatNetSource(bodyName, id)
@@ -12,9 +14,10 @@ classdef FakeNatNetSource < handle
                 'qx', 0, 'qy', 0, 'qz', 0, 'qw', 1, 'Tracked', true);
         end
         function frame = getFrame(obj)
-            obj.frameNumber = obj.frameNumber + 1;
+            if obj.returnEmpty, frame = []; return; end
+            if obj.advanceFrame, obj.frameNumber = obj.frameNumber + 1; end
             frame = struct('iFrame', obj.frameNumber, ...
-                'nRigidBodies', 1, 'RigidBodies', obj.body);
+                'nRigidBodies', numel(obj.body), 'RigidBodies', obj.body);
         end
         function close(~)
         end
